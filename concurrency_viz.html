@@ -1,0 +1,405 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Go Concurrency Visualization: Baking Party</title>
+  <style>
+    html, body {
+      height: 100%;
+      margin: 0;
+      padding: 0;
+      background: #f8f8fc;
+      overflow: hidden;
+    }
+    #canvas {
+      display: block;
+      position: absolute;
+      top: 0;
+      left: 0;
+      z-index: 1;
+      background: transparent;
+    }
+    #controls {
+      position: fixed;
+      left: 10px;
+      bottom: 10px;
+      z-index: 10;
+      background: #222a;
+      border-radius: 8px;
+      padding: 8px 12px;
+      box-shadow: 0 2px 8px #0002;
+      display: flex;
+      gap: 8px;
+    }
+    #outputContainer {
+      position: fixed;
+      left: 50%;
+      bottom: 70px;
+      transform: translateX(-50%);
+      z-index: 10;
+      font-size: 1.2em;
+      pointer-events: none;
+    }
+    button {
+      background: #4CAF50;
+      border: none;
+      padding: 8px 12px;
+      margin: 5px;
+      border-radius: 4px;
+      color: #fff;
+      cursor: pointer;
+    }
+    button:hover { background: #45a049; }
+  </style>
+</head>
+<body>
+  <canvas id="canvas" width="1200" height="500"></canvas>
+  <div id="controls">
+    <button id="resetBtn">Reset Demo</button>
+    <button id="startBtn" style="font-size:1.1em; padding:8px 18px; background:#4285F4;">Start Baking Party Visualization</button>
+  </div>
+  <div id="outputContainer"></div>
+  <script>
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    const outputContainer = document.getElementById('outputContainer');
+
+    // Layout: main() on left, tasks aligned horizontally
+    let mainBox = { label: 'main()', color: '#009FFD', width: 140, height: 76, active: false };
+    let tasks = [
+      { label: 'bakeLemonCake', color: '#FFD600', active: false },
+      { label: 'bakeStrawberryCupcakes', color: '#FF4081', active: false },
+      { label: 'grillChicken', color: '#FF9100', active: false },
+      { label: 'cookGoatStew', color: '#8D6E63', active: false }
+    ];
+
+    // New: Track goroutine states for concurrent highlighting
+    const GOROUTINE_STATES = {
+      INACTIVE: 0,
+      ACTIVE: 1,
+      WAITING: 2,
+      DONE: 3
+    };
+
+    // Each step describes the state for each goroutine
+    // [lemon, strawberry, chicken, goat]
+    const concurrentSteps = [
+      // main() only
+      { desc: 'main() starts, sets up WaitGroup and channel', mainActive: true, states: [0,0,0,0] },
+      // all goroutines launched concurrently
+      { desc: 'All goroutines launched concurrently', mainActive: false, states: [1,2,1,1] }, // 2=waiting
+      // Lemon cake decides sugar level
+      { desc: 'bakeLemonCake decides sugar level and sends via channel', mainActive: false, states: [1,2,1,1], channelSend: true },
+      // Strawberry receives sugar level
+      { desc: 'bakeStrawberryCupcakes receives sugar level and starts baking', mainActive: false, states: [1,1,1,1], channelRecv: true },
+      // Chicken done
+      { desc: 'grillChicken is done', mainActive: false, states: [1,1,3,1] },
+      // Lemon cake done
+      { desc: 'bakeLemonCake is done', mainActive: false, states: [3,1,3,1] },
+      // Strawberry cupcakes done
+      { desc: 'bakeStrawberryCupcakes is done', mainActive: false, states: [3,3,3,1] },
+      // Goat stew done
+      { desc: 'cookGoatStew is done', mainActive: false, states: [3,3,3,3] },
+      // main resumes
+      { desc: 'All goroutines finish, main() resumes', mainActive: true, states: [3,3,3,3] }
+    ];
+
+    // --- Improved Text Wrapping: allow up to 4 lines, break at hyphens, parentheses, camelCase, and spaces ---
+    function smartWrapText(ctx, label, maxWidth, font, maxLines = 4) {
+      ctx.save();
+      ctx.font = font;
+      // Split at camelCase, spaces, hyphens, and parentheses
+      let words = label
+        .replace(/([a-z])([A-Z])/g, '$1 $2')
+        .replace(/[-()]/g, ' $& ')
+        .split(/\s+/);
+      let lines = [];
+      let current = '';
+      for (let i = 0; i < words.length; i++) {
+        let test = current ? current + ' ' + words[i] : words[i];
+        let testWidth = ctx.measureText(test).width;
+        if (testWidth > maxWidth && current) {
+          lines.push(current);
+          current = words[i];
+        } else {
+          current = test;
+        }
+      }
+      if (current) lines.push(current);
+      if (lines.length > maxLines) {
+        lines = lines.slice(0, maxLines-1).concat([lines.slice(maxLines-1).join(' ')]);
+      }
+      ctx.restore();
+      return lines;
+    }
+
+    // --- Step 1: Balanced Layout (increase block size) ---
+    const BLOCK_WIDTH = 180;
+    const BLOCK_HEIGHT = 76;
+    const BLOCK_SPACING_X = 100; // More space between blocks
+    const OUTER_MARGIN_X = 64;
+    const OUTER_MARGIN_Y = 64;
+
+    // Calculate dynamic positions for centering with equal spacing for all blocks
+    function getLayout() {
+      const totalWidth = mainBox.width + tasks.length * BLOCK_WIDTH + tasks.length * BLOCK_SPACING_X;
+      const startX = (canvas.width - totalWidth) / 2;
+      let layout = {
+        main: {
+          x: startX,
+          y: canvas.height / 2 - BLOCK_HEIGHT / 2,
+          width: mainBox.width,
+          height: BLOCK_HEIGHT
+        },
+        tasks: []
+      };
+      let x = startX + mainBox.width + BLOCK_SPACING_X;
+      for (let i = 0; i < tasks.length; i++) {
+        layout.tasks.push({
+          x: x,
+          y: canvas.height / 2 - BLOCK_HEIGHT / 2,
+          width: BLOCK_WIDTH,
+          height: BLOCK_HEIGHT
+        });
+        x += BLOCK_WIDTH + BLOCK_SPACING_X;
+      }
+      return layout;
+    }
+
+    // --- Step 3: Modern Block Styling (patched to use smartWrapText and more spacing) ---
+    function drawBox(x, y, w, h, color, label, active, done = false) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.roundRect(x, y, w, h, 16);
+      if (done) {
+        ctx.fillStyle = '#eafbe7';
+        ctx.strokeStyle = '#43a047';
+        ctx.shadowColor = '#43a04755';
+        ctx.shadowBlur = 16;
+      } else if (active) {
+        ctx.fillStyle = '#f6fbff';
+        ctx.strokeStyle = '#009FFD';
+        ctx.shadowColor = '#009FFD88';
+        ctx.shadowBlur = 18;
+      } else {
+        ctx.fillStyle = '#fff';
+        ctx.strokeStyle = '#b0b4ba';
+        ctx.shadowColor = '#bbb';
+        ctx.shadowBlur = 6;
+      }
+      ctx.fill();
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+      // Try normal font first
+      let font = 'bold 1.1em Fira Mono, Consolas, monospace';
+      ctx.font = font;
+      ctx.fillStyle = '#23272e';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      const maxWidth = w - 24;
+      let lines = smartWrapText(ctx, label, maxWidth, font, 4);
+      // If still overflowing, shrink font
+      if (lines.length === 4 && ctx.measureText(lines[3]).width > maxWidth) {
+        font = 'bold 1em Fira Mono, Consolas, monospace';
+        ctx.font = font;
+        lines = smartWrapText(ctx, label, maxWidth, font, 4);
+      }
+      const lineHeight = 20;
+      const totalHeight = lineHeight * lines.length;
+      let yStart = y + h/2 - totalHeight/2 + lineHeight/2;
+      for (let i = 0; i < lines.length; i++) {
+        ctx.fillText(lines[i], x + w/2, yStart + i * lineHeight);
+      }
+      ctx.restore();
+    }
+
+    // --- Step 2: Improved Step Description ---
+    function drawConcurrentStepDescription(stepIdx, layout) {
+      ctx.save();
+      ctx.font = '600 1.35em "Segoe UI", "Fira Mono", Consolas, monospace';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'bottom';
+      let desc = concurrentSteps[stepIdx].desc;
+      let x = canvas.width/2;
+      let y = layout.main.y - 54; // more space above blocks
+      ctx.fillStyle = '#009FFD';
+      ctx.fillText(desc, x, y);
+      ctx.restore();
+    }
+
+    // --- Hand-drawn style main-to-task arrows ---
+    function drawArrow(from, to, text, color, fanIdx = 0, fanTotal = 1, handDrawn = false) {
+      ctx.save();
+      const startX = from.x + from.width;
+      const startY = from.y + from.height / 2;
+      const endX = to.x;
+      const endY = to.y + to.height / 2;
+      ctx.beginPath();
+      if (handDrawn) {
+        // Place control points above/below row for hand-drawn effect
+        // Topmost arrow arcs upward, bottommost downward, middle ones less so
+        // Spread control points vertically based on fanIdx
+        let handFan = [
+          -120, // topmost (arc up)
+          -40,  // upper-mid (gentle arc up)
+           40,  // lower-mid (gentle arc down)
+          120   // bottommost (arc down)
+        ];
+        let spreadY = handFan[fanIdx] || 0;
+        let ctrlX = startX + (endX - startX) * 0.33;
+        let ctrlY = startY + spreadY;
+        ctx.moveTo(startX, startY);
+        ctx.quadraticCurveTo(ctrlX, ctrlY, endX, endY);
+      } else if (fanTotal > 1 && fanIdx !== undefined) {
+        // For channel arrows, keep previous curve logic
+        let offset = (fanIdx - (fanTotal-1)/2) * 24;
+        const curveX = (startX + endX) / 2;
+        const curveY = Math.min(startY, endY) - 40 - Math.abs(offset)*0.4;
+        ctx.moveTo(startX, startY);
+        ctx.quadraticCurveTo(curveX, curveY, endX, endY);
+      } else {
+        ctx.moveTo(startX, startY);
+        ctx.lineTo(endX, endY);
+      }
+      ctx.lineWidth = 4;
+      ctx.strokeStyle = color || '#00BCD4';
+      ctx.shadowColor = color || '#00BCD4';
+      ctx.shadowBlur = 8;
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+      // Draw arrowhead
+      // For hand-drawn, calculate angle at end of curve
+      let angle;
+      if (handDrawn) {
+        let ctrlX = startX + (endX - startX) * 0.33;
+        let ctrlY = startY + ([ -120, -40, 40, 120 ][fanIdx] || 0);
+        // Derivative of quadratic Bezier at t=1
+        let dx = endX - ctrlX;
+        let dy = endY - ctrlY;
+        angle = Math.atan2(dy, dx);
+      } else {
+        angle = Math.atan2(endY - startY, endX - startX);
+      }
+      const arrowLen = 18;
+      ctx.beginPath();
+      ctx.moveTo(endX, endY);
+      ctx.lineTo(endX - arrowLen * Math.cos(angle - 0.35), endY - arrowLen * Math.sin(angle - 0.35));
+      ctx.lineTo(endX - arrowLen * Math.cos(angle + 0.35), endY - arrowLen * Math.sin(angle + 0.35));
+      ctx.lineTo(endX, endY);
+      ctx.fillStyle = color || '#00BCD4';
+      ctx.globalAlpha = 0.9;
+      ctx.fill();
+      ctx.globalAlpha = 1.0;
+      // Draw label above the arrow (only for channel)
+      if (text) {
+        ctx.save();
+        ctx.font = 'bold 1em "Segoe UI", "Fira Mono", Consolas, monospace';
+        ctx.fillStyle = color || '#00BCD4';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'bottom';
+        let labelX = (startX + endX) / 2;
+        let labelY = Math.min(startY, endY) - 18;
+        ctx.shadowColor = '#fff';
+        ctx.shadowBlur = 6;
+        ctx.fillText(text, labelX, labelY);
+        ctx.shadowBlur = 0;
+        ctx.restore();
+      }
+      ctx.restore();
+    }
+
+    // Patch: use hand-drawn arrows for main-to-task
+    function drawConcurrent(stepIdx) {
+      const layout = getLayout();
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      drawConcurrentStepDescription(stepIdx, layout);
+      // Draw main box
+      let mainActive = concurrentSteps[stepIdx].mainActive;
+      let mainDone = stepIdx === concurrentSteps.length - 1;
+      drawBox(layout.main.x, layout.main.y, layout.main.width, layout.main.height, mainBox.color, mainBox.label, mainActive, mainDone);
+      // Draw hand-drawn style arrows from main() to each task (only at step 1)
+      if (stepIdx === 1) {
+        for (let i = 0; i < tasks.length; i++) {
+          drawArrow(layout.main, layout.tasks[i], '', '#aaa', i, tasks.length, true /* handDrawn */);
+        }
+      }
+      // Draw task boxes with new styling
+      for (let i = 0; i < tasks.length; i++) {
+        let state = concurrentSteps[stepIdx].states[i];
+        let active = state === GOROUTINE_STATES.ACTIVE || state === GOROUTINE_STATES.WAITING;
+        let done = state === GOROUTINE_STATES.DONE;
+        let label = tasks[i].label;
+        if (state === GOROUTINE_STATES.WAITING) label += '\n(waiting...)';
+        drawBox(layout.tasks[i].x, layout.tasks[i].y, layout.tasks[i].width, layout.tasks[i].height, tasks[i].color, label, active, done);
+      }
+      // Draw channel arrow when appropriate (still curved)
+      if (concurrentSteps[stepIdx]?.channelSend) {
+        drawArrow(layout.tasks[0], layout.tasks[1], 'sugar level', '#00BCD4');
+      }
+      if (concurrentSteps[stepIdx]?.channelRecv) {
+        drawArrow(layout.tasks[0], layout.tasks[1], 'sugar level', '#00BCD4');
+      }
+    }
+
+    // Helper: Draw rounded rectangle
+    function roundRect(ctx, x, y, w, h, r) {
+      ctx.beginPath();
+      ctx.moveTo(x + r, y);
+      ctx.lineTo(x + w - r, y);
+      ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+      ctx.lineTo(x + w, y + h - r);
+      ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+      ctx.lineTo(x + r, y + h);
+      ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+      ctx.lineTo(x, y + r);
+      ctx.quadraticCurveTo(x, y, x + r, y);
+      ctx.closePath();
+    }
+
+    // Replace animation logic to use drawConcurrent and concurrentSteps
+    let currentStep = 0;
+    let interval = null;
+    function runVisualization() {
+      currentStep = 0;
+      drawConcurrent(currentStep);
+      outputContainer.innerHTML = '';
+      interval = setInterval(() => {
+        currentStep++;
+        if (currentStep >= concurrentSteps.length) {
+          clearInterval(interval);
+          outputContainer.innerHTML = `<b>Visualization complete!</b>`;
+          return;
+        }
+        drawConcurrent(currentStep);
+        outputContainer.innerHTML = '';
+      }, 3000);
+    }
+
+    document.getElementById('startBtn').onclick = function() {
+      clearInterval(interval);
+      runVisualization();
+    };
+    document.getElementById('resetBtn').onclick = function() {
+      clearInterval(interval);
+      currentStep = 0;
+      drawConcurrent(currentStep);
+      outputContainer.innerHTML = `<b>Press \"Start Baking Party Visualization\" to begin.</b>`;
+    };
+
+    // Initial render
+    drawConcurrent(0);
+    outputContainer.innerHTML = `<b>Press \"Start Baking Party Visualization\" to begin.</b>`;
+
+    // Responsive canvas
+    function resizeCanvas() {
+      const w = Math.max(window.innerWidth, 1200);
+      const h = Math.max(window.innerHeight, 500);
+      canvas.width = w;
+      canvas.height = h;
+    }
+    resizeCanvas();
+    window.addEventListener('resize', resizeCanvas);
+  </script>
+</body>
+</html>
