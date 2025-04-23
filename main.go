@@ -9,7 +9,7 @@ import (
 // Simulate deciding the sugar level and sharing it via a channel
 func bakeLemonCake(sugarLevelChan chan<- int, wg *sync.WaitGroup, sem chan struct{}) {
 	defer wg.Done()
-	sem <- struct{}{} // acquire semaphore
+	sem <- struct{}{}        // acquire semaphore
 	defer func() { <-sem }() // release semaphore
 	fmt.Println("Baking lemon cake: Deciding sugar level...")
 	time.Sleep(1 * time.Second) // Simulate time to decide
@@ -23,7 +23,7 @@ func bakeLemonCake(sugarLevelChan chan<- int, wg *sync.WaitGroup, sem chan struc
 
 func bakeStrawberryCupcakes(sugarLevelChan <-chan int, wg *sync.WaitGroup, sem chan struct{}) {
 	defer wg.Done()
-	sem <- struct{}{} // acquire semaphore
+	sem <- struct{}{}        // acquire semaphore
 	defer func() { <-sem }() // release semaphore
 	fmt.Println("Baking strawberry cupcakes: Waiting for sugar level from lemon cake...")
 	sugarLevel := <-sugarLevelChan // Wait for sugar level
@@ -35,7 +35,7 @@ func bakeStrawberryCupcakes(sugarLevelChan <-chan int, wg *sync.WaitGroup, sem c
 
 func grillChicken(wg *sync.WaitGroup, sem chan struct{}) {
 	defer wg.Done()
-	sem <- struct{}{} // acquire semaphore
+	sem <- struct{}{}        // acquire semaphore
 	defer func() { <-sem }() // release semaphore
 	fmt.Println("Grilling chicken: Starting...")
 	time.Sleep(3 * time.Second)
@@ -44,7 +44,7 @@ func grillChicken(wg *sync.WaitGroup, sem chan struct{}) {
 
 func cookGoatStew(wg *sync.WaitGroup, sem chan struct{}) {
 	defer wg.Done()
-	sem <- struct{}{} // acquire semaphore
+	sem <- struct{}{}        // acquire semaphore
 	defer func() { <-sem }() // release semaphore
 	fmt.Println("Cooking goat stew: Starting...")
 	time.Sleep(4 * time.Second)
@@ -53,8 +53,24 @@ func cookGoatStew(wg *sync.WaitGroup, sem chan struct{}) {
 
 func main() {
 	var wg sync.WaitGroup
-	sugarLevelChan := make(chan int)
-	sem := make(chan struct{}, 2) // Semaphore with 2 slots
+	// Buffered channel demonstration
+	bufferedChan := make(chan int, 2)
+	fmt.Println("Demonstrating buffered channel behavior:")
+	fmt.Println("Sending 1 to bufferedChan...")
+	bufferedChan <- 1 // does not block
+	fmt.Println("Sent 1 (no block)")
+	fmt.Println("Sending 2 to bufferedChan...")
+	bufferedChan <- 2 // does not block
+	fmt.Println("Sent 2 (no block)")
+	// The next send would block because buffer is full, so we'll comment it
+	// fmt.Println("Sending 3 to bufferedChan (will block)...")
+	// bufferedChan <- 3 // would block here
+	fmt.Println("Receiving from bufferedChan:")
+	fmt.Println(<-bufferedChan)
+	fmt.Println(<-bufferedChan)
+	fmt.Println("Buffered channel demonstration complete.")
+	sugarLevelChan := make(chan int, 2) // Now buffered
+	sem := make(chan struct{}, 2)       // Semaphore with 2 slots
 
 	wg.Add(4)
 	go bakeLemonCake(sugarLevelChan, &wg, sem)
