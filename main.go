@@ -53,22 +53,27 @@ func cookGoatStew(wg *sync.WaitGroup, sem chan struct{}) {
 
 func main() {
 	var wg sync.WaitGroup
-	// Buffered channel demonstration
-	bufferedChan := make(chan int, 2)
-	fmt.Println("Demonstrating buffered channel behavior:")
-	fmt.Println("Sending 1 to bufferedChan...")
-	bufferedChan <- 1 // does not block
-	fmt.Println("Sent 1 (no block)")
-	fmt.Println("Sending 2 to bufferedChan...")
-	bufferedChan <- 2 // does not block
-	fmt.Println("Sent 2 (no block)")
-	// The next send would block because buffer is full, so we'll comment it
-	// fmt.Println("Sending 3 to bufferedChan (will block)...")
-	// bufferedChan <- 3 // would block here
-	fmt.Println("Receiving from bufferedChan:")
-	fmt.Println(<-bufferedChan)
-	fmt.Println(<-bufferedChan)
-	fmt.Println("Buffered channel demonstration complete.")
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		bufferedChan := make(chan int, 2)
+		fmt.Println("Demonstrating buffered channel behavior:")
+		fmt.Println("Sending 1 to bufferedChan...")
+		bufferedChan <- 1 // does not block
+		fmt.Println("Sent 1 (no block)")
+		fmt.Println("Sending 2 to bufferedChan...")
+		bufferedChan <- 2 // does not block
+		fmt.Println("Sent 2 (no block)")
+		// The next send would block because buffer is full, so we'll comment it
+		// fmt.Println("Sending 3 to bufferedChan (will block)...")
+		// bufferedChan <- 3 // would block here
+		fmt.Println("Receiving from bufferedChan:")
+		fmt.Println(<-bufferedChan)
+		fmt.Println(<-bufferedChan)
+		fmt.Println("Buffered channel demonstration complete.")
+	}()
+
 	sugarLevelChan := make(chan int, 2) // Now buffered
 	sem := make(chan struct{}, 2)       // Semaphore with 2 slots
 
